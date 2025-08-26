@@ -23,9 +23,9 @@ active_matches = {}  # guild_id: {message_id, participants, start_time, original
 MATCH_DURATION = 585  # 9 minutes and 45 seconds (585 seconds)
 
 LANE_REACTIONS = {
-    '🟡': 'Yellow Lane',
-    '🔵': 'Blue Lane', 
-    '🟢': 'Green Lane'
+    '🟡': 'Lane - Yellow',
+    '🔵': 'Lane - Blue', 
+    '🟢': 'Lane - Green'
 }
 
 @bot.event
@@ -76,9 +76,9 @@ async def start_lane_assignment(message):
         color=0xe74c3c
     )
     
-    embed.add_field(name="🟡", value="Yellow Lane", inline=True)
-    embed.add_field(name="🔵", value="Blue Lane", inline=True)
-    embed.add_field(name="🟢", value="Green Lane", inline=True)
+    embed.add_field(name="🟡", value="Lane - Yellow", inline=True)
+    embed.add_field(name="🔵", value="Lane - Blue", inline=True)
+    embed.add_field(name="🟢", value="Lane - Green", inline=True)
     
     embed.add_field(name="⚠️ Important", value="You must be in a voice channel to be moved!", inline=False)
     
