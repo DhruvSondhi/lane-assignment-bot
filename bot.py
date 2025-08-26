@@ -45,10 +45,10 @@ async def on_message(message):
     guild_id = message.guild.id
     
     # Check if message is in general chat and contains trigger phrases
-    if message.channel.name.lower() in ['general', 'general-chat']:
+    if message.channel.name.lower() in ['lane-assignment']:
         content = message.content.lower()
         
-        if 'start match lane assignments' in content:
+        if 'start match lane assignments' or 'start laning' in content:
             await start_lane_assignment(message)
         elif 'pause match' in content and guild_id in active_matches:
             await pause_match(message)
