@@ -54,6 +54,8 @@ async def on_message(message):
             await pause_match(message)
         elif 'resume match' in content and guild_id in active_matches:
             await resume_match(message)
+        elif 'stop match' in content and guild_id in active_matches:
+            await stop_match(message)
         elif 'time remaining' in content or 'match status' in content:
             await show_match_status(message)
     
@@ -220,6 +222,28 @@ async def on_reaction_remove(reaction, user):
                 except discord.HTTPException:
                     pass
 
+async def stop_match(message):
+    """Stop the current match and move everyone back immediately"""
+    guild_id = message.guild.id
+    
+    if guild_id not in active_matches:
+        await message.reply("❌ No active lane assignment to stop!")
+        return
+    
+    # End the match with stop reason
+    await end_match(guild_id, "🛑 Match stopped manually")
+    del active_matches[guild_id]
+    
+    embed = discord.Embed(
+        title="🛑 Match Stopped",
+        description="The lane assignment has been stopped and all participants have been moved back to their original channels.",
+        color=0xe74c3c
+    )
+    embed.set_footer(text=f"Stopped by {message.author.display_name}")
+    embed.timestamp = datetime.now()
+    
+    await message.reply(embed=embed)
+
 async def pause_match(message):
     """Pause the current match"""
     guild_id = message.guild.id
@@ -350,11 +374,11 @@ async def show_match_status(message):
     if lane_info:
         embed.add_field(name="🎯 Current Lane Distribution", value="\n\n".join(lane_info), inline=False)
     
-    # Add pause/resume instructions
+    # Add pause/resume/stop instructions
     if match_data['paused_at']:
-        embed.add_field(name="💡 Controls", value="Type `resume match` to continue", inline=False)
+        embed.add_field(name="💡 Controls", value="Type `resume match` to continue or `stop match` to end", inline=False)
     else:
-        embed.add_field(name="💡 Controls", value="Type `pause match` to pause", inline=False)
+        embed.add_field(name="💡 Controls", value="Type `pause match` to pause or `stop match` to end", inline=False)
     
     embed.timestamp = current_time
     
