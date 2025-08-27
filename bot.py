@@ -1,8 +1,7 @@
 import discord
 from discord.ext import commands, tasks
 import asyncio
-from datetime import datetime, timedelta
-import json
+from datetime import datetime
 import os
 import webserver
 
@@ -42,13 +41,17 @@ async def on_message(message):
     if message.author.bot:
         return
     
-    guild_id = message.guild.id
+    # Skip if not in a guild
+    if not message.guild:
+        return
     
-    # Check if message is in general chat and contains trigger phrases
-    if message.channel.name.lower() in ['lane-assignment']:
-        content = message.content.lower()
-        
-        if 'start match lane assignments' or 'start laning' in content:
+    guild_id = message.guild.id
+    content = message.content.lower()
+    
+    # Check if message is in lane-assignment channel and contains trigger phrases
+    if message.channel.name.lower() == 'lane-assignment':
+        # Fixed the logic error here - was using 'or' instead of proper checking
+        if 'start match lane assignments' in content or 'start laning' in content:
             await start_lane_assignment(message)
         elif 'pause match' in content and guild_id in active_matches:
             await pause_match(message)
@@ -68,7 +71,7 @@ async def start_lane_assignment(message):
     
     # Check if there's already an active match
     if guild_id in active_matches:
-        await message.reply("❌ There's already an active lane assignment! Wait for it to finish or use `!end_match` to cancel it.")
+        await message.reply("❌ There's already an active lane assignment! Type 'stop match' to cancel it first.")
         return
     
     # Create the lane selection embed
@@ -83,6 +86,7 @@ async def start_lane_assignment(message):
     embed.add_field(name="🟢", value="Lane - Green", inline=True)
     
     embed.add_field(name="⚠️ Important", value="You must be in a voice channel to be moved!", inline=False)
+    embed.add_field(name="💡 Controls", value="Type `pause match`, `stop match`, or `time remaining` in this channel", inline=False)
     
     embed.set_footer(text=f"Started by {message.author.display_name}")
     embed.timestamp = datetime.now()
@@ -132,10 +136,16 @@ async def on_reaction_add(reaction, user):
     member = reaction.message.guild.get_member(user.id)
     if not member or not member.voice or not member.voice.channel:
         # Send a temporary message
-        temp_msg = await reaction.message.channel.send(f"❌ {user.mention}, you must be in a voice channel to join a lane!")
-        await asyncio.sleep(5)
-        await temp_msg.delete()
-        await reaction.remove(user)
+        try:
+            temp_msg = await reaction.message.channel.send(f"❌ {user.mention}, you must be in a voice channel to join a lane!")
+            await asyncio.sleep(5)
+            await temp_msg.delete()
+        except:
+            pass
+        try:
+            await reaction.remove(user)
+        except:
+            pass
         return
     
     original_channel = member.voice.channel
@@ -145,18 +155,23 @@ async def on_reaction_add(reaction, user):
     target_channel = discord.utils.get(member.guild.voice_channels, name=target_lane)
     
     if not target_channel:
-        temp_msg = await reaction.message.channel.send(f"❌ {target_lane} voice channel not found! Please create it first.")
-        await asyncio.sleep(5)
-        await temp_msg.delete()
+        try:
+            temp_msg = await reaction.message.channel.send(f"❌ {target_lane} voice channel not found! Use `!setup_lanes` to create it.")
+            await asyncio.sleep(5)
+            await temp_msg.delete()
+        except:
+            pass
         return
     
     # Remove user from other lane reactions if they were already assigned
     if user.id in match_data['participants']:
-        old_lane = match_data['participants'][user.id]['lane']
         # Remove their previous reactions
         for old_emoji, old_lane_name in LANE_REACTIONS.items():
-            if old_lane_name == old_lane and old_emoji != emoji:
-                await reaction.message.remove_reaction(old_emoji, user)
+            if old_emoji != emoji:
+                try:
+                    await reaction.message.remove_reaction(old_emoji, user)
+                except:
+                    pass
     
     try:
         # Move the user
@@ -170,17 +185,26 @@ async def on_reaction_add(reaction, user):
         }
         
         # Confirmation message
-        confirmation = await reaction.message.channel.send(
-            f"✅ {user.mention} has been assigned to **{target_lane}**!"
-        )
-        await asyncio.sleep(3)
-        await confirmation.delete()
-        
-    except discord.HTTPException as e:
-        temp_msg = await reaction.message.channel.send(f"❌ Failed to move {user.mention}: {str(e)}")
-        await asyncio.sleep(5)
-        await temp_msg.delete()
-        await reaction.remove(user)
+        try:
+            confirmation = await reaction.message.channel.send(
+                f"✅ {user.mention} assigned to **{target_lane}**!"
+            )
+            await asyncio.sleep(3)
+            await confirmation.delete()
+        except:
+            pass
+            
+    except discord.HTTPException:
+        try:
+            temp_msg = await reaction.message.channel.send(f"❌ Failed to move {user.mention} - check bot permissions!")
+            await asyncio.sleep(5)
+            await temp_msg.delete()
+        except:
+            pass
+        try:
+            await reaction.remove(user)
+        except:
+            pass
 
 @bot.event
 async def on_reaction_remove(reaction, user):
@@ -201,7 +225,7 @@ async def on_reaction_remove(reaction, user):
     if emoji not in LANE_REACTIONS:
         return
     
-    # If user was in this lane, move them back to general voice chat
+    # If user was in this lane, move them back to original channel
     if user.id in match_data['participants']:
         participant_data = match_data['participants'][user.id]
         if participant_data['lane'] == LANE_REACTIONS[emoji]:
@@ -213,12 +237,15 @@ async def on_reaction_remove(reaction, user):
                     await member.move_to(original_channel)
                     del match_data['participants'][user.id]
                     
-                    temp_msg = await reaction.message.channel.send(
-                        f"↩️ {user.mention} has been moved back to **{original_channel.name}**"
-                    )
-                    await asyncio.sleep(3)
-                    await temp_msg.delete()
-                    
+                    try:
+                        temp_msg = await reaction.message.channel.send(
+                            f"↩️ {user.mention} moved back to **{original_channel.name}**"
+                        )
+                        await asyncio.sleep(3)
+                        await temp_msg.delete()
+                    except:
+                        pass
+                        
                 except discord.HTTPException:
                     pass
 
@@ -378,7 +405,7 @@ async def show_match_status(message):
     if match_data['paused_at']:
         embed.add_field(name="💡 Controls", value="Type `resume match` to continue or `stop match` to end", inline=False)
     else:
-        embed.add_field(name="💡 Controls", value="Type `pause match` to pause or `stop match` to end", inline=False)
+        embed.add_field(name="💡 Controls", value="Type `pause match`, `stop match`, or `time remaining`", inline=False)
     
     embed.timestamp = current_time
     
@@ -449,27 +476,7 @@ async def end_match(guild_id, reason="Match ended"):
         embed.timestamp = datetime.now()
         await channel.send(embed=embed)
 
-@bot.command(name='end_match')
-@commands.has_permissions(move_members=True)
-async def end_match_command(ctx):
-    """Manually end the current lane assignment"""
-    guild_id = ctx.guild.id
-    
-    if guild_id not in active_matches:
-        await ctx.send("❌ No active lane assignment found!")
-        return
-    
-    await end_match(guild_id, "🛑 Match ended manually")
-    del active_matches[guild_id]
-    await ctx.send("✅ Lane assignment ended successfully!")
-
-@bot.command(name='match_status')
-async def match_status_command(ctx):
-    """Check the status of the current match (command version)"""
-    await show_match_status(ctx.message)
-
 @bot.command(name='setup_lanes')
-@commands.has_permissions(administrator=True)
 async def setup_lanes(ctx):
     """Create the necessary voice channels for lane assignments"""
     guild = ctx.guild
@@ -499,12 +506,9 @@ async def on_command_error(ctx, error):
         await ctx.send("❌ You don't have permission to use this command!")
     elif isinstance(error, commands.CommandNotFound):
         pass  # Ignore unknown commands
-    else:
-        print(f"Error: {error}")
 
 # Run the bot
 if __name__ == "__main__":
-    # Replace with your bot token
     TOKEN = os.environ['token']
     webserver.keep_alive()
     bot.run(TOKEN)
