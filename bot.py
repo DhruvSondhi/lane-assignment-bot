@@ -19,7 +19,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 active_matches = {}  # guild_id: {message_id, participants, start_time, original_channels, paused_at, total_paused_time}
 
 # Match configuration
-MATCH_DURATION = 570  # 9 minutes and 45 seconds (585 seconds)
+MATCH_DURATION = 400  # 9 minutes and 45 seconds (585 seconds)
 
 
 LANE_REACTIONS = {
@@ -513,5 +513,6 @@ if __name__ == "__main__":
     TOKEN = os.environ['token']
     webserver.keep_alive()
     bot.run(TOKEN)
+
 
 
