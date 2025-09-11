@@ -3,6 +3,7 @@ from discord.ext import commands, tasks
 import asyncio
 from datetime import datetime
 import os
+import re
 import webserver
 
 # Bot configuration
@@ -16,16 +17,23 @@ intents.members = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Data storage for active matches
-active_matches = {}  # guild_id: {message_id, participants, start_time, original_channels, paused_at, total_paused_time}
+active_matches = {}  # guild_id: {message_id, participants, start_time, original_channels, paused_at, total_paused_time, match_duration}
 
 # Match configuration
-MATCH_DURATION = 400  # 9 minutes and 45 seconds (585 seconds)
-
+DEFAULT_MATCH_DURATION = 400  # 6 minutes and 45 seconds (405 seconds)
 
 LANE_REACTIONS = {
     '🟡': 'Lane - Yellow',
     '🔵': 'Lane - Blue', 
     '🟢': 'Lane - Green'
+}
+
+# Control reactions
+CONTROL_REACTIONS = {
+    '⏸️': 'pause',
+    '▶️': 'resume', 
+    '🛑': 'stop',
+    '⏱️': 'status'
 }
 
 @bot.event
@@ -51,34 +59,51 @@ async def on_message(message):
     
     # Check if message is in lane-assignment channel and contains trigger phrases
     if message.channel.name.lower() == 'lane-assignment':
-        # Fixed the logic error here - was using 'or' instead of proper checking
         if 'start match lane assignments' in content or 'start laning' in content:
-            await start_lane_assignment(message)
-        elif 'pause match' in content and guild_id in active_matches:
-            await pause_match(message)
-        elif 'resume match' in content and guild_id in active_matches:
-            await resume_match(message)
-        elif 'stop match' in content and guild_id in active_matches:
-            await stop_match(message)
+            # Check for custom time format
+            custom_duration = parse_custom_time(content)
+            await start_lane_assignment(message, custom_duration)
+        # Remove old text command handlers since we're using reactions now
         elif 'time remaining' in content or 'match status' in content:
             await show_match_status(message)
     
     # Process other commands
     await bot.process_commands(message)
 
-async def start_lane_assignment(message):
+def parse_custom_time(content):
+    """Parse custom time from message content in mm:ss format"""
+    # Look for pattern like "start laning 5:30" or "start laning (5:30)"
+    time_pattern = r'start laning.*?(?:\()?(\d{1,2}):(\d{2})(?:\))?'
+    match = re.search(time_pattern, content)
+    
+    if match:
+        minutes = int(match.group(1))
+        seconds = int(match.group(2))
+        # Validate reasonable time limits (1 second to 20 minutes)
+        total_seconds = minutes * 60 + seconds
+        if 1 <= total_seconds <= 1200:  # 1 second to 20 mins
+            return total_seconds
+    
+    return DEFAULT_MATCH_DURATION
+
+async def start_lane_assignment(message, match_duration=DEFAULT_MATCH_DURATION):
     """Start a new lane assignment session"""
     guild_id = message.guild.id
     
     # Check if there's already an active match
     if guild_id in active_matches:
-        await message.reply("❌ There's already an active lane assignment! Type 'stop match' to cancel it first.")
+        await message.reply("❌ There's already an active lane assignment! Use the 🛑 reaction to cancel it first.")
         return
+    
+    # Format duration for display
+    duration_minutes = match_duration // 60
+    duration_seconds = match_duration % 60
+    duration_text = f"{duration_minutes} minutes {duration_seconds} seconds" if duration_seconds > 0 else f"{duration_minutes} minutes"
     
     # Create the lane selection embed
     embed = discord.Embed(
         title="🎯 Lane Assignments Started!",
-        description=f"React with your preferred lane. You'll be moved automatically!\n\n**Match Duration:** 6 minutes 40 seconds",
+        description=f"React with your preferred lane. You'll be moved automatically!\n\n**Match Duration:** {duration_text}",
         color=0xe74c3c
     )
     
@@ -87,7 +112,13 @@ async def start_lane_assignment(message):
     embed.add_field(name="🟢", value="Lane - Green", inline=True)
     
     embed.add_field(name="⚠️ Important", value="You must be in a voice channel to be moved!", inline=False)
-    embed.add_field(name="💡 Controls", value="Type `pause match`, `stop match`, or `time remaining` in this channel", inline=False)
+    
+    # Updated controls section
+    embed.add_field(
+        name="🎮 Match Controls", 
+        value="⏸️ Pause │ ▶️ Resume │ 🛑 Stop │ ⏱️ Status", 
+        inline=False
+    )
     
     embed.set_footer(text=f"Started by {message.author.display_name}")
     embed.timestamp = datetime.now()
@@ -95,8 +126,12 @@ async def start_lane_assignment(message):
     # Send the embed message
     lane_message = await message.channel.send(embed=embed)
     
-    # Add reactions
+    # Add lane reactions
     for emoji in LANE_REACTIONS.keys():
+        await lane_message.add_reaction(emoji)
+    
+    # Add control reactions
+    for emoji in CONTROL_REACTIONS.keys():
         await lane_message.add_reaction(emoji)
     
     # Initialize match data
@@ -107,14 +142,15 @@ async def start_lane_assignment(message):
         'start_time': datetime.now(),
         'guild': message.guild,
         'paused_at': None,  # When the match was paused
-        'total_paused_time': 0  # Total seconds the match has been paused
+        'total_paused_time': 0,  # Total seconds the match has been paused
+        'match_duration': match_duration  # Store the custom duration
     }
     
-    await message.reply(f"✅ Lane assignment started! Match will last **6 minutes 40 seconds**.")
+    await message.reply(f"✅ Lane assignment started! Match will last **{duration_text}**.")
 
 @bot.event
 async def on_reaction_add(reaction, user):
-    """Handle lane selection reactions"""
+    """Handle lane selection and control reactions"""
     if user.bot:
         return
     
@@ -128,8 +164,29 @@ async def on_reaction_add(reaction, user):
     if reaction.message.id != match_data['message_id']:
         return
     
-    # Check if the reaction is a valid lane selection
     emoji = str(reaction.emoji)
+    
+    # Handle control reactions
+    if emoji in CONTROL_REACTIONS:
+        action = CONTROL_REACTIONS[emoji]
+        
+        if action == 'pause':
+            await handle_pause_reaction(reaction, user, guild_id)
+        elif action == 'resume':
+            await handle_resume_reaction(reaction, user, guild_id)
+        elif action == 'stop':
+            await handle_stop_reaction(reaction, user, guild_id)
+        elif action == 'status':
+            await handle_status_reaction(reaction, user, guild_id)
+        
+        # Remove the user's reaction for control buttons (so they can be used again)
+        try:
+            await reaction.remove(user)
+        except:
+            pass
+        return
+    
+    # Handle lane selection reactions (existing code)
     if emoji not in LANE_REACTIONS:
         return
     
@@ -207,6 +264,171 @@ async def on_reaction_add(reaction, user):
         except:
             pass
 
+async def handle_pause_reaction(reaction, user, guild_id):
+    """Handle pause reaction"""
+    match_data = active_matches[guild_id]
+    
+    if match_data['paused_at'] is not None:
+        try:
+            temp_msg = await reaction.message.channel.send(f"❌ {user.mention}, match is already paused!")
+            await asyncio.sleep(3)
+            await temp_msg.delete()
+        except:
+            pass
+        return
+    
+    # Record pause time
+    match_data['paused_at'] = datetime.now()
+    
+    embed = discord.Embed(
+        title="⏸️ Match Paused",
+        description="The lane assignment has been paused. Use ▶️ to resume.",
+        color=0xf39c12
+    )
+    embed.set_footer(text=f"Paused by {user.display_name}")
+    embed.timestamp = datetime.now()
+    
+    try:
+        temp_msg = await reaction.message.channel.send(embed=embed)
+        await asyncio.sleep(5)
+        await temp_msg.delete()
+    except:
+        pass
+
+async def handle_resume_reaction(reaction, user, guild_id):
+    """Handle resume reaction"""
+    match_data = active_matches[guild_id]
+    
+    if match_data['paused_at'] is None:
+        try:
+            temp_msg = await reaction.message.channel.send(f"❌ {user.mention}, match is not paused!")
+            await asyncio.sleep(3)
+            await temp_msg.delete()
+        except:
+            pass
+        return
+    
+    # Calculate how long the match was paused and add to total
+    pause_duration = (datetime.now() - match_data['paused_at']).total_seconds()
+    match_data['total_paused_time'] += pause_duration
+    match_data['paused_at'] = None
+    
+    embed = discord.Embed(
+        title="▶️ Match Resumed",
+        description="The lane assignment has been resumed!",
+        color=0x2ecc71
+    )
+    embed.set_footer(text=f"Resumed by {user.display_name}")
+    embed.timestamp = datetime.now()
+    
+    try:
+        temp_msg = await reaction.message.channel.send(embed=embed)
+        await asyncio.sleep(5)
+        await temp_msg.delete()
+    except:
+        pass
+
+async def handle_stop_reaction(reaction, user, guild_id):
+    """Handle stop reaction"""
+    # End the match with stop reason
+    await end_match(guild_id, "🛑 Match stopped manually")
+    del active_matches[guild_id]
+    
+    embed = discord.Embed(
+        title="🛑 Match Stopped",
+        description="The lane assignment has been stopped and all participants have been moved back to their original channels.",
+        color=0xe74c3c
+    )
+    embed.set_footer(text=f"Stopped by {user.display_name}")
+    embed.timestamp = datetime.now()
+    
+    try:
+        await reaction.message.channel.send(embed=embed)
+    except:
+        pass
+
+async def handle_status_reaction(reaction, user, guild_id):
+    """Handle status reaction"""
+    match_data = active_matches[guild_id]
+    current_time = datetime.now()
+    start_time = match_data['start_time']
+    total_paused_time = match_data['total_paused_time']
+    match_duration = match_data['match_duration']
+    
+    # Calculate elapsed time
+    if match_data['paused_at'] is not None:
+        # Match is paused - don't include current pause time in elapsed
+        elapsed = (match_data['paused_at'] - start_time).total_seconds() - total_paused_time
+        status_emoji = "⏸️"
+        status_text = "PAUSED"
+    else:
+        # Match is running
+        elapsed = (current_time - start_time).total_seconds() - total_paused_time
+        status_emoji = "▶️"
+        status_text = "RUNNING"
+    
+    remaining = max(0, match_duration - elapsed)
+    remaining_minutes = int(remaining // 60)
+    remaining_seconds = int(remaining % 60)
+    
+    embed = discord.Embed(
+        title=f"{status_emoji} Lane Assignment Status",
+        description=f"**Status:** {status_text}",
+        color=0xf39c12 if match_data['paused_at'] else 0x3498db
+    )
+    
+    embed.add_field(
+        name="⏱️ Time Remaining", 
+        value=f"{remaining_minutes}:{remaining_seconds:02d}", 
+        inline=True
+    )
+    embed.add_field(
+        name="👥 Total Participants", 
+        value=len(match_data['participants']), 
+        inline=True
+    )
+    
+    # Show lane distribution with actual voice channel members
+    guild = reaction.message.guild
+    lane_info = []
+    
+    for emoji, lane_name in LANE_REACTIONS.items():
+        # Get the voice channel
+        voice_channel = discord.utils.get(guild.voice_channels, name=lane_name)
+        
+        if voice_channel:
+            # Get members currently in this voice channel
+            members_in_vc = [member.display_name for member in voice_channel.members]
+            member_count = len(members_in_vc)
+            
+            if member_count > 0:
+                # Limit display to first 5 members to avoid embed limits
+                displayed_members = members_in_vc[:5]
+                if member_count > 5:
+                    displayed_members.append(f"... and {member_count - 5} more")
+                
+                lane_info.append(f"{emoji} **{lane_name}** ({member_count})\n└ {', '.join(displayed_members)}")
+            else:
+                lane_info.append(f"{emoji} **{lane_name}** (0)")
+        else:
+            lane_info.append(f"{emoji} **{lane_name}** (Channel not found)")
+    
+    if lane_info:
+        embed.add_field(name="🎯 Current Lane Distribution", value="\n\n".join(lane_info), inline=False)
+    
+    # Add control instructions
+    embed.add_field(name="🎮 Controls", value="Use the reactions above: ⏸️ Pause │ ▶️ Resume │ 🛑 Stop", inline=False)
+    
+    embed.set_footer(text=f"Requested by {user.display_name}")
+    embed.timestamp = current_time
+    
+    try:
+        status_msg = await reaction.message.channel.send(embed=embed)
+        await asyncio.sleep(10)  # Show status longer than other messages
+        await status_msg.delete()
+    except:
+        pass
+
 @bot.event
 async def on_reaction_remove(reaction, user):
     """Handle when someone removes their lane reaction"""
@@ -223,6 +445,8 @@ async def on_reaction_remove(reaction, user):
         return
     
     emoji = str(reaction.emoji)
+    
+    # Only handle lane reactions for removal, not control reactions
     if emoji not in LANE_REACTIONS:
         return
     
@@ -250,86 +474,9 @@ async def on_reaction_remove(reaction, user):
                 except discord.HTTPException:
                     pass
 
-async def stop_match(message):
-    """Stop the current match and move everyone back immediately"""
-    guild_id = message.guild.id
-    
-    if guild_id not in active_matches:
-        await message.reply("❌ No active lane assignment to stop!")
-        return
-    
-    # End the match with stop reason
-    await end_match(guild_id, "🛑 Match stopped manually")
-    del active_matches[guild_id]
-    
-    embed = discord.Embed(
-        title="🛑 Match Stopped",
-        description="The lane assignment has been stopped and all participants have been moved back to their original channels.",
-        color=0xe74c3c
-    )
-    embed.set_footer(text=f"Stopped by {message.author.display_name}")
-    embed.timestamp = datetime.now()
-    
-    await message.reply(embed=embed)
-
-async def pause_match(message):
-    """Pause the current match"""
-    guild_id = message.guild.id
-    
-    if guild_id not in active_matches:
-        await message.reply("❌ No active lane assignment to pause!")
-        return
-    
-    match_data = active_matches[guild_id]
-    
-    if match_data['paused_at'] is not None:
-        await message.reply("❌ Match is already paused!")
-        return
-    
-    # Record pause time
-    match_data['paused_at'] = datetime.now()
-    
-    embed = discord.Embed(
-        title="⏸️ Match Paused",
-        description="The lane assignment has been paused. Type 'resume match' to continue.",
-        color=0xf39c12
-    )
-    embed.set_footer(text=f"Paused by {message.author.display_name}")
-    embed.timestamp = datetime.now()
-    
-    await message.reply(embed=embed)
-
-async def resume_match(message):
-    """Resume a paused match"""
-    guild_id = message.guild.id
-    
-    if guild_id not in active_matches:
-        await message.reply("❌ No active lane assignment to resume!")
-        return
-    
-    match_data = active_matches[guild_id]
-    
-    if match_data['paused_at'] is None:
-        await message.reply("❌ Match is not paused!")
-        return
-    
-    # Calculate how long the match was paused and add to total
-    pause_duration = (datetime.now() - match_data['paused_at']).total_seconds()
-    match_data['total_paused_time'] += pause_duration
-    match_data['paused_at'] = None
-    
-    embed = discord.Embed(
-        title="▶️ Match Resumed",
-        description="The lane assignment has been resumed!",
-        color=0x2ecc71
-    )
-    embed.set_footer(text=f"Resumed by {message.author.display_name}")
-    embed.timestamp = datetime.now()
-    
-    await message.reply(embed=embed)
-
+# Keep the old text command handlers for backward compatibility
 async def show_match_status(message):
-    """Show current match status with time and participant info"""
+    """Show current match status with time and participant info (text command version)"""
     guild_id = message.guild.id
     
     if guild_id not in active_matches:
@@ -340,6 +487,7 @@ async def show_match_status(message):
     current_time = datetime.now()
     start_time = match_data['start_time']
     total_paused_time = match_data['total_paused_time']
+    match_duration = match_data['match_duration']
     
     # Calculate elapsed time
     if match_data['paused_at'] is not None:
@@ -353,7 +501,7 @@ async def show_match_status(message):
         status_emoji = "▶️"
         status_text = "RUNNING"
     
-    remaining = max(0, MATCH_DURATION - elapsed)
+    remaining = max(0, match_duration - elapsed)
     remaining_minutes = int(remaining // 60)
     remaining_seconds = int(remaining % 60)
     
@@ -402,11 +550,8 @@ async def show_match_status(message):
     if lane_info:
         embed.add_field(name="🎯 Current Lane Distribution", value="\n\n".join(lane_info), inline=False)
     
-    # Add pause/resume/stop instructions
-    if match_data['paused_at']:
-        embed.add_field(name="💡 Controls", value="Type `resume match` to continue or `stop match` to end", inline=False)
-    else:
-        embed.add_field(name="💡 Controls", value="Type `pause match`, `stop match`, or `time remaining`", inline=False)
+    # Updated controls section
+    embed.add_field(name="🎮 Controls", value="Use reactions on the lane assignment message: ⏸️ Pause │ ▶️ Resume │ 🛑 Stop │ ⏱️ Status", inline=False)
     
     embed.timestamp = current_time
     
@@ -425,10 +570,11 @@ async def match_timer():
             
         start_time = match_data['start_time']
         total_paused_time = match_data['total_paused_time']
+        match_duration = match_data['match_duration']
         elapsed = (current_time - start_time).total_seconds() - total_paused_time
         
         # Check if match time is up
-        if elapsed >= MATCH_DURATION:
+        if elapsed >= match_duration:
             await end_match(guild_id, "⏰ Time's up!")
             guilds_to_remove.append(guild_id)
     
@@ -513,7 +659,3 @@ if __name__ == "__main__":
     TOKEN = os.environ['token']
     webserver.keep_alive()
     bot.run(TOKEN)
-
-
-
-
