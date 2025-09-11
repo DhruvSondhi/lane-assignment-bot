@@ -78,7 +78,7 @@ async def start_lane_assignment(message):
     # Create the lane selection embed
     embed = discord.Embed(
         title="🎯 Lane Assignments Started!",
-        description=f"React with your preferred lane. You'll be moved automatically!\n\n**Match Duration:** 9 minutes 45 seconds",
+        description=f"React with your preferred lane. You'll be moved automatically!\n\n**Match Duration:** 6 minutes 40 seconds",
         color=0xe74c3c
     )
     
@@ -110,7 +110,7 @@ async def start_lane_assignment(message):
         'total_paused_time': 0  # Total seconds the match has been paused
     }
     
-    await message.reply(f"✅ Lane assignment started! Match will last **9 minutes 45 seconds**.")
+    await message.reply(f"✅ Lane assignment started! Match will last **6 minutes 40 seconds**.")
 
 @bot.event
 async def on_reaction_add(reaction, user):
@@ -513,6 +513,7 @@ if __name__ == "__main__":
     TOKEN = os.environ['token']
     webserver.keep_alive()
     bot.run(TOKEN)
+
 
 
 
